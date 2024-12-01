@@ -1,8 +1,9 @@
 import streamlit as st
 import sqlite3
-import requests
+import ccxt
 import pandas as pd
 import matplotlib.pyplot as plt
+import datetime
 
 # Инициализация базы данных
 conn = sqlite3.connect('data/users.db', check_same_thread=False)
@@ -19,16 +20,82 @@ def login_user(username, password):
     c.execute('SELECT * FROM users WHERE username = ? AND password = ?', (username, password))
     return c.fetchone()
 
-def main():
-    st.title('Платформа курсов валют')
+def fetch_binance_data(symbol, start_date):
+    exchange = ccxt.binance()
+    if exchange.has['fetchOHLCV']:
+        since = exchange.parse8601(start_date)
+        all_orders = []
+        limit = 1000  # Максимально допустимое значение на Binance
+        while since < exchange.milliseconds():
+            ohlcv = exchange.fetch_ohlcv(symbol=symbol, since=since, timeframe='1d', limit=limit)
+            if len(ohlcv) > 0:
+                since = ohlcv[-1][0] + 1
+                all_orders += ohlcv
+            else:
+                break
+        return all_orders
+    else:
+        return None
 
-    menu = ['Главная', 'Курс валют', 'Вход', 'Регистрация']
+def clean_data(ohlcv_list):
+    temp = []
+    for i in ohlcv_list:
+        timestamp_with_ms = i[0]
+        dt = datetime.datetime.fromtimestamp(timestamp_with_ms / 1000)
+        i[0] = dt
+        temp.append(i)
+    return temp
+
+def get_ohlcv_df(symbol, start_date):
+    data = fetch_binance_data(symbol, start_date)
+    if data is not None:
+        cleaned_data = clean_data(data)
+        ohlcv_df = pd.DataFrame(cleaned_data, columns=["Дата", "Цена открытия", "Макс. цена", "Мин. цена", "Цена закрытия", "Объем торгов"])
+        
+        # Рассчитываем SMA и EWMA
+        ohlcv_df['SMA'] = ohlcv_df['Цена закрытия'].rolling(window=20).mean()
+        ohlcv_df['EWMA'] = ohlcv_df['Цена закрытия'].ewm(span=20, adjust=False).mean()
+        
+        return ohlcv_df
+    else:
+        return None
+
+def plot_ohlcv_data(df, symbol):
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['Дата'], df['Цена закрытия'], label='Цена закрытия', color='blue')
+    plt.plot(df['Дата'], df['SMA'], label='SMA (20 дней)', color='orange')
+    plt.plot(df['Дата'], df['EWMA'], label='EWMA (20 дней)', color='green')
+    plt.title(f'Цена закрытия и скользящие средние для {symbol}')
+    plt.xlabel('Дата')
+    plt.ylabel('Цена')
+    plt.legend()
+    plt.grid(True)
+    st.pyplot(plt)
+
+def show_crypto_charts():
+    st.subheader('Графики курсов криптовалют с SMA и EWMA')
+
+    symbol = st.selectbox('Выберите криптовалюту', ['BTC/USDT', 'ETH/USDT', 'BNB/USDT'])
+    start_date = st.date_input('Дата начала', datetime.date(2020, 11, 1))
+
+    if st.button('Показать график'):
+        start_date_str = start_date.strftime('%Y-%m-%dT00:00:00Z')
+        df = get_ohlcv_df(symbol, start_date_str)
+        if df is not None:
+            plot_ohlcv_data(df, symbol)
+        else:
+            st.error('Не удалось получить данные')
+
+def main():
+    st.title('Платформа курсов криптовалют')
+
+    menu = ['Главная', 'Курс криптовалют', 'Вход', 'Регистрация']
     choice = st.sidebar.selectbox('Меню', menu)
 
     if choice == 'Главная':
-        st.subheader('Добро пожаловать на платформу курсов валют!')
-    elif choice == 'Курс валют':
-        show_currency_charts()
+        st.subheader('Добро пожаловать на платформу курсов криптовалют!')
+    elif choice == 'Курс криптовалют':
+        show_crypto_charts()
     elif choice == 'Вход':
         st.subheader('Авторизация')
 
@@ -61,41 +128,6 @@ def main():
         st.session_state['logged_in'] = False
         st.session_state['username'] = ''
         st.success('Вы вышли из системы.')
-
-def show_currency_charts():
-    st.subheader('Графики курсов валют')
-
-    base_currency = st.selectbox('Базовая валюта', ['USD', 'EUR', 'GBP'])
-    target_currency = st.selectbox('Целевая валюта', ['EUR', 'USD', 'GBP', 'JPY', 'AUD'])
-
-    if st.button('Показать график'):
-        data = get_exchange_rates(base_currency, target_currency)
-        if data is not None:
-            plot_exchange_rates(data, base_currency, target_currency)
-        else:
-            st.error('Не удалось получить данные')
-
-def get_exchange_rates(base, target):
-    url = f'https://api.exchangerate.host/timeseries?start_date=2023-01-01&end_date=2023-12-31&base={base}&symbols={target}'
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        rates = data['rates']
-        df = pd.DataFrame(rates).T
-        df = df.rename(columns={target: 'Rate'})
-        df.index = pd.to_datetime(df.index)
-        return df
-    else:
-        return None
-
-def plot_exchange_rates(data, base, target):
-    plt.figure(figsize=(10, 5))
-    plt.plot(data.index, data['Rate'], marker='o')
-    plt.title(f'Курс {base} к {target}')
-    plt.xlabel('Дата')
-    plt.ylabel('Курс')
-    plt.grid(True)
-    st.pyplot(plt)
 
 if __name__ == '__main__':
     # Инициализация состояния сессии
